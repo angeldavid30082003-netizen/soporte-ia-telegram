@@ -1,0 +1,507 @@
+{
+  "name": "Entre Ágiles — Soporte Telegram + Chatwoot",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "chatwoot",
+        "options": {}
+      },
+      "id": "41a180a7-7aee-4a9c-a20b-fb43b9baec0c",
+      "name": "N1 — Webhook Chatwoot",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -1648,
+        1184
+      ],
+      "webhookId": "cf4561c3-2684-48f5-8fe5-f894ab5c0132"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first();\nconst body = item.json.body || item.json;\n\nif (body.event !== 'message_created') return [];\nif (body.message_type !== 'incoming') return [];\nif (body.sender && (body.sender.type === 'user' || body.sender.type === 'agent_bot')) return [];\nif (body.content_attributes && Object.keys(body.content_attributes).length > 0) return [];\n\n// Obtener historial de mensajes anteriores de la conversación\nlet historial = [];\ntry {\n  const convData = await this.helpers.httpRequest({\n    method: 'GET',\n    url: `http://127.0.0.1:3000/api/v1/accounts/${body.account.id}/conversations/${body.conversation.id}/messages`,\n    headers: {\n      'api_access_token': 'TU_CHATWOOT_ACCESS_TOKEN'\n    },\n    json: true\n  });\n\n  // Convertir historial al formato de mensajes para Groq\n  const mensajes = (convData.payload || []).slice(-6); // últimos 6 mensajes\n  historial = mensajes\n    .filter(m => m.content && m.content.trim())\n    .map(m => ({\n      role: m.message_type === 0 ? 'user' : 'assistant',\n      content: m.content\n    }));\n} catch(e) {\n  historial = [];\n}\n\n// Si ya hay historial, Sara ya saludó — no debe volver a hacerlo\nconst yaSaludo = historial.length > 1;\n\nreturn [{\n  json: {\n    conversation_id: body.conversation.id,\n    account_id: body.account.id,\n    sender_nombre: body.sender ? body.sender.name : 'Cliente',\n    texto_mensaje: body.content || '',\n    historial: historial,\n    prompt_sistema: `Eres Sara, la asistente virtual de Entre Ágiles, empresa colombiana de capacitación y certificaciones TI. Tienes una personalidad cálida, amable y cercana siempre saluda con buenos dias, buenas tardes o buenas noches.\n\nTONO Y ESTILO:\n- Escribe como una persona real, no como un robot\n- Usa lenguaje natural y cercano, apropiado para Colombia\n- Puedes usar expresiones como \"claro que sí\", \"con gusto\"\n- Usa emojis con moderación — uno o dos por mensaje máximo\n- Si alguien pregunta cómo estás, responde de forma genuina y amable\n- Si no sabes algo, pásalo a un asesor sin que se note\n\n${yaSaludo ? \n'YA SALUDASTE ANTES — No repitas \"Hola\" ni ningún saludo. Ve directo al punto de la conversación.' : \n'PRIMER CONTACTO — Saluda con calidez y pregunta en qué puedes ayudar.'}\n\nCUANDO EL CLIENTE TIENE UN PROBLEMA:\nPide amablemente estos datos:\n- Nombre completo\n- Número de cédula\n- Correo electrónico\n\nLINKS ÚTILES:\n- Grabaciones, sesiones, plataforma de examen o grupo de WhatsApp → https://comunidad.entreagiles.com/public/my-sessions\n\nSOBRE ENTRE ÁGILES:\n- Certificaciones: ITIL 4, Scrum, PMP, COBIT, AWS, Azure, CompTIA\n- Vouchers Pearson VUE y CertMind\n- Plataforma: app.entreagiles.com\n- Clases por Teams y Zoom\n\nPROCESO DE EXÁMENES:\n1. Compras el voucher con Entre Ágiles\n2. Lo activas en CertMind o Pearson VUE\n3. Agendas tu examen en el portal\n4. Presencial o desde casa (online proctored)\n\nPUEDES RESPONDER: proceso de examen, vouchers, CertMind vs Pearson, requisitos online, certificaciones, acceso a plataforma.\n\nPASA AL ASESOR SI: pide hablar con persona, necesita info de su cuenta/pago/examen específico.\n\nResponde SIEMPRE en JSON válido:\n{\"puede_resolver\": true/false, \"necesita_humano\": true/false, \"categoria\": \"examenes|plataforma|tecnico|general\", \"respuesta\": \"mensaje para el cliente\", \"razon\": \"solo si necesita_humano\"}`\n  }\n}];"
+      },
+      "id": "1e742945-211a-494a-a9c7-1c079257d1d6",
+      "name": "N4 — Construir prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -976,
+        1184
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first();\n\n// Limpiar historial — eliminar vacíos y asegurar que empiece con user\nlet historialLimpio = (item.json.historial || []).filter(m => \n  m.content && m.content.trim() !== '' && m.content !== null\n);\n\n// Groq requiere que el primer mensaje sea siempre role: user\n// Si empieza con assistant, lo eliminamos\nif (historialLimpio.length > 0 && historialLimpio[0].role === 'assistant') {\n  historialLimpio = historialLimpio.slice(1);\n}\n\n// Verificar que no haya dos mensajes consecutivos del mismo rol\nconst historialFinal = [];\nfor (let i = 0; i < historialLimpio.length; i++) {\n  if (i === 0 || historialLimpio[i].role !== historialLimpio[i-1].role) {\n    historialFinal.push(historialLimpio[i]);\n  }\n}\n\nconst response = await this.helpers.httpRequest({\n  method: 'POST',\n  url: 'https://api.groq.com/openai/v1/chat/completions',\n  headers: {\n    'Authorization': 'Bearer TU_GROQ_API_KEY',\n    'Content-Type': 'application/json'\n  },\n  body: {\n    model: 'openai/gpt-oss-20b',\n    temperature: 0.4,\n    max_tokens: 1024,\n    messages: [\n      {role: 'system', content: item.json.prompt_sistema},\n      ...historialFinal,\n      {role: 'user', content: item.json.sender_nombre + ': ' + item.json.texto_mensaje}\n    ]\n  },\n  json: true\n});\n\nreturn [{\n  json: {\n    ...response,\n    conversation_id: item.json.conversation_id,\n    account_id: item.json.account_id,\n    sender_nombre: item.json.sender_nombre,\n    texto_mensaje: item.json.texto_mensaje\n  }\n}];"
+      },
+      "id": "7d1579fe-4eda-4c96-926e-90f9aee89548",
+      "name": "N5 — Groq API",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -752,
+        1184
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first();\nconst content = item.json.choices[0].message.content;\n\nlet parsed;\ntry {\n  const jsonMatch = content.match(/\\{[\\s\\S]*\\}/);\n  parsed = JSON.parse(jsonMatch ? jsonMatch[0] : content);\n} catch(e) {\n  parsed = {puede_resolver: false, necesita_humano: true, categoria: 'general', respuesta: 'Un momento, te conectamos con un especialista de Entre Ágiles.', razon: 'Error IA'};\n}\n\nconst mensaje = (item.json.texto_mensaje || '').toLowerCase();\nconst pideHumano = mensaje.includes('asesor') || mensaje.includes('humano') || mensaje.includes('hablar con') || mensaje.includes('agente') || mensaje.includes('persona');\n\nif (parsed.respuesta && parsed.respuesta.length > 20 && !pideHumano) {\n  parsed.puede_resolver = true;\n  parsed.necesita_humano = false;\n}\n\nif (pideHumano) {\n  parsed.puede_resolver = false;\n  parsed.necesita_humano = true;\n  parsed.razon = 'Cliente solicitó hablar con un asesor';\n}\n\nreturn [{json: {\n  ...parsed,\n  conversation_id: item.json.conversation_id,\n  account_id: item.json.account_id,\n  sender_nombre: item.json.sender_nombre,\n  texto_mensaje: item.json.texto_mensaje\n}}];"
+      },
+      "id": "ae819ce2-fe94-41ae-8f67-e828fe0f6fad",
+      "name": "N6 — Parsear respuesta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -528,
+        1184
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "c3",
+              "leftValue": "={{ $json.puede_resolver }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            },
+            {
+              "id": "c4",
+              "leftValue": "={{ $json.necesita_humano }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "false"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "2920f69d-9a3b-4af2-8837-471abd1049f9",
+      "name": "N7 — ¿Resuelve la IA?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -304,
+        1184
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://127.0.0.1:3000/api/v1/accounts/{{ $json.account_id }}/conversations/{{ $json.conversation_id }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "api_access_token",
+              "value": "TU_CHATWOOT_ACCESS_TOKEN"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "content",
+              "value": "={{ $json.respuesta }}"
+            },
+            {
+              "name": "message_type",
+              "value": "outgoing"
+            },
+            {
+              "name": "private",
+              "value": "false"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a7a04ba1-305b-4358-82ea-eef1644c6f73",
+      "name": "N8 — IA responde vía Chatwoot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -80,
+        1056
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.all()[0];\nconst now = new Date();\nconst col = new Date(now.toLocaleString('en-US',{timeZone:'America/Bogota'}));\nconst hora = col.getHours() + col.getMinutes()/60;\nconst dia = col.getDay();\nreturn [{json:{...item.json, hora_colombia:hora, dia_semana:dia, hora_formato:col.toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})}}];"
+      },
+      "id": "baa245d9-9ee5-4cdc-94b6-11739f1bc359",
+      "name": "N9 — Hora Colombia",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -80,
+        1296
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.all()[0];\nconst hora = item.json.hora_colombia;\nconst dia = item.json.dia_semana;\nconst categoria = item.json.categoria;\n\n// Chatwoot Agent IDs\n// ⚠️ Angel aún no está en Chatwoot — usando ID 2 (Soporte) como placeholder\n// Cuando agregues a Angel, reemplaza 2 con su ID real\nconst asesores = [\n  {\n    id: 1, chatwoot_id: 2, nombre: 'Angel David Garzón', especialidad: 'general',\n    horario: {1:[{i:8,f:12},{i:13,f:16.5}],2:[{i:8,f:12},{i:13,f:16.5}],3:[{i:8,f:12},{i:13,f:16.5}],4:[{i:8,f:12}],5:[{i:8,f:12},{i:13,f:16.5}],6:[{i:8,f:12}]}\n  },\n  {\n    id: 2, chatwoot_id: 3, nombre: 'Edwar Ortiz Melo', especialidad: 'general',\n    horario: {1:[{i:13,f:21}],2:[{i:13,f:21}],3:[{i:13,f:21}],4:[{i:13,f:21}],5:[{i:9,f:13},{i:14,f:17.5}],6:[{i:8,f:12}]}\n  },\n  {\n    id: 3, chatwoot_id: 4, nombre: 'Stephania Ortiz', especialidad: 'examenes',\n    horario: {1:[{i:10,f:20}],2:[{i:10,f:20}],3:[{i:15.5,f:20}],4:[{i:13,f:20}],5:[{i:13,f:14},{i:16.5,f:20}],6:[{i:8,f:12}]}\n  }\n];\n\nfunction disponible(a,d,h){\n  const t=a.horario[d];\n  return t&&t.some(s=>h>=s.i&&h<s.f);\n}\n\nlet disp=asesores.filter(a=>disponible(a,dia,hora));\nif(categoria==='examenes'){\n  disp=[...disp.filter(a=>a.especialidad==='examenes'),...disp.filter(a=>a.especialidad!=='examenes')];\n}\n\nreturn [{json:{...item.json,asesores_disponibles:disp,hay_disponibles:disp.length>0}}];"
+      },
+      "id": "36473de2-4b0e-4df3-9729-60b2a0ff9e76",
+      "name": "N10 — Verificar disponibilidad",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        144,
+        1296
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "c5",
+              "leftValue": "={{ $json.hay_disponibles }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "6faca4ad-275b-4f1e-9b5c-14b40f8457bd",
+      "name": "N11 — ¿Hay disponibles?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        368,
+        1296
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://127.0.0.1:3000/api/v1/accounts/{{ $json.account_id }}/conversations/{{ $json.conversation_id }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "api_access_token",
+              "value": "TU_CHATWOOT_ACCESS_TOKEN"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "content",
+              "value": "=={{ $json.respuesta }}"
+            },
+            {
+              "name": "message_type",
+              "value": "outgoing"
+            },
+            {
+              "name": "private",
+              "value": "false"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "742fcb25-4abf-4828-b06b-94410e424b5f",
+      "name": "N12 — Fuera de horario",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        592,
+        1184
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.all()[0];\nconst disponibles = item.json.asesores_disponibles;\nreturn [{json:{\n  ...item.json,\n  asesor_elegido: disponibles[0],\n  account_id: item.json.account_id,\n  conversation_id: item.json.conversation_id\n}}];"
+      },
+      "id": "d315023f-0976-4f0e-ae21-e989abe286f6",
+      "name": "N13 — Seleccionar asesor",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        592,
+        1408
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://127.0.0.1:3000/api/v1/accounts/{{ $('N13 — Seleccionar asesor').item.json.account_id }}/conversations/{{ $('N13 — Seleccionar asesor').item.json.conversation_id }}/assignments",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "api_access_token",
+              "value": "TU_CHATWOOT_ACCESS_TOKEN"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"assignee_id\": {{ $json.asesor_elegido.chatwoot_id }}\n}",
+        "options": {}
+      },
+      "id": "9d3b02a7-b385-49e2-ba96-19fe00e9a21d",
+      "name": "N14 — Asignar en Chatwoot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        816,
+        1408
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://127.0.0.1:3000/api/v1/accounts/{{ $('N13 — Seleccionar asesor').item.json.account_id }}/conversations/{{ $('N13 — Seleccionar asesor').item.json.conversation_id }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "api_access_token",
+              "value": "TU_CHATWOOT_ACCESS_TOKEN"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "content",
+              "value": "=={{ $json.respuesta }}"
+            },
+            {
+              "name": "message_type",
+              "value": "outgoing"
+            },
+            {
+              "name": "private",
+              "value": "false"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "70470146-51a4-44ab-8e35-0f751ee98a58",
+      "name": "N15 — Confirmar al cliente",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1040,
+        1408
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "N1 — Webhook Chatwoot": {
+      "main": [
+        [
+          {
+            "node": "N4 — Construir prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "N4 — Construir prompt": {
+      "main": [
+        [
+          {
+            "node": "N5 — Groq API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "N5 — Groq API": {
+      "main": [
+        [
+          {
+            "node": "N6 — Parsear respuesta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "N6 — Parsear respuesta": {
+      "main": [
+        [
+          {
+            "node": "N7 — ¿Resuelve la IA?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "N7 — ¿Resuelve la IA?": {
+      "main": [
+        [
+          {
+            "node": "N8 — IA responde vía Chatwoot",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "N9 — Hora Colombia",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "N9 — Hora Colombia": {
+      "main": [
+        [
+          {
+            "node": "N10 — Verificar disponibilidad",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "N10 — Verificar disponibilidad": {
+      "main": [
+        [
+          {
+            "node": "N11 — ¿Hay disponibles?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "N11 — ¿Hay disponibles?": {
+      "main": [
+        [
+          {
+            "node": "N13 — Seleccionar asesor",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "N12 — Fuera de horario",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "N13 — Seleccionar asesor": {
+      "main": [
+        [
+          {
+            "node": "N14 — Asignar en Chatwoot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "N14 — Asignar en Chatwoot": {
+      "main": [
+        [
+          {
+            "node": "N15 — Confirmar al cliente",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "c616a608-b069-42d5-bc9c-67004eca6cab",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "438f351e2485ffe9b8065a5b478b9a5160814de1c58fb1a8255d089ece7f9b1c"
+  },
+  "id": "UcVxyNmh6fa9xMeW",
+  "tags": [
+    {
+      "updatedAt": "2026-08-26T19:15:21.788Z",
+      "createdAt": "2026-08-26T19:15:21.788Z",
+      "id": "AGFSMghkGJDONxxQ",
+      "name": "Chatwoot"
+    },
+    {
+      "updatedAt": "2026-08-21T14:28:35.163Z",
+      "createdAt": "2026-08-21T14:28:35.163Z",
+      "id": "LujV7qBQbyxky1wc",
+      "name": "Entre Ágiles"
+    },
+    {
+      "updatedAt": "2026-08-21T14:28:35.177Z",
+      "createdAt": "2026-08-21T14:28:35.177Z",
+      "id": "T3JuLk0sTzsJv7yj",
+      "name": "Groq"
+    },
+    {
+      "updatedAt": "2026-08-21T14:28:35.172Z",
+      "createdAt": "2026-08-21T14:28:35.172Z",
+      "id": "ZR3AfL8kXkmxvRbI",
+      "name": "Telegram"
+    }
+  ]
+}
