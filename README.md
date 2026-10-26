@@ -29,7 +29,7 @@ Ubuntu Server 22.04	Sistema operativo del servidor	$0
 Nginx + Let's Encrypt	Proxy reverso con SSL	$0
 DuckDNS	DNS dinámico gratuito	$0
 MikroTik	Router con reglas NAT	Hardware propio
-------------------------------------------------------
+******************************************************
 🏗️ Arquitectura
 -Cliente (Telegram)
        │
@@ -43,7 +43,7 @@ MikroTik	Router con reglas NAT	Hardware propio
                               │
                               └──► Asigna asesor
                                    en Chatwoot
--------------------------------------------------------                                   
+                                
 Infraestructura de red
 Internet
    │
